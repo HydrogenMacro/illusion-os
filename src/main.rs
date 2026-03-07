@@ -6,8 +6,8 @@
     holding buffers for the duration of a data transfer."
 )]
 #![deny(clippy::large_stack_frames)]
-pub mod co5300;
-pub mod co5300_commands;
+
+mod display;
 
 use bt_hci::controller::ExternalController;
 use embassy_executor::Spawner;
@@ -24,8 +24,10 @@ use esp_hal::{
 };
 use esp_radio::ble::controller::BleConnector;
 use log::{error, info};
+
+use crate::display::co5300::CO5300;
+use crate::display::color::RGB565;
 //use trouble_host::prelude::*;
-use crate::co5300_commands::*;
 extern crate alloc;
 
 const CONNECTIONS_MAX: usize = 1;
@@ -79,87 +81,27 @@ async fn main(spawner: Spawner) -> ! {
         .unwrap()
         .with_scl(peripherals.GPIO7)
         .with_sda(peripherals.GPIO8);
-    
+
     let mut a = [0; 2];
     i2c.write_read(0x34, &[0xA4], &mut a).unwrap();
 
     info!("aaa {:?}", a);
-
-    let mut lcd_reset = Output::new(
+    
+    let mut co5300 = CO5300::new(
         peripherals.GPIO11,
-        Level::High,
-        OutputConfig::default(),
-    );
-    lcd_reset.set_low();
-    lcd_reset.set_high();
-
-    let mut spi_cs = Output::new(
-        peripherals.GPIO15,
-        Level::High,
-        OutputConfig::default(),
-    );
-    let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = esp_hal::dma_buffers!(4096);
-
-    let dma_rx_buf = esp_hal::dma::DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
-
-    let dma_tx_buf = esp_hal::dma::DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
-
-    let mut spi = Spi::new(
         peripherals.SPI2,
-        SpiConfig::default().with_frequency(Rate::from_mhz(80)),
-    )
-    .unwrap()
-    .with_cs(peripherals.GPIO5)
-    .with_sck(peripherals.GPIO0)
-    .with_sio0(peripherals.GPIO1)
-    .with_sio1(peripherals.GPIO2)
-    .with_sio2(peripherals.GPIO3)
-    .with_sio3(peripherals.GPIO4)
-    .with_dma(peripherals.DMA_CH0)
-    .with_buffers(dma_rx_buf, dma_tx_buf);
-    lcd_reset.set_low();
-    lcd_reset.set_high();
-
-    spi_write_cmd(&mut spi, CO5300_C_SLPOUT, &mut spi_cs);
-
-    spi_write_c8d8(&mut spi, 0xFE, 0x00, &mut spi_cs);
-    spi_write_c8d8(&mut spi, CO5300_W_SPIMODECTL, 0x80, &mut spi_cs);
-    spi_write_c8d8(&mut spi, CO5300_W_PIXFMT, 0x55, &mut spi_cs);
-    spi_write_c8d8(&mut spi, CO5300_W_WCTRLD1, 0x20, &mut spi_cs);
-    spi_write_c8d8(&mut spi, CO5300_W_WDBRIGHTNESSVALHBM, 0xFF, &mut spi_cs);
-    spi_write_cmd(&mut spi, CO5300_C_DISPON, &mut spi_cs);
-    spi_write_c8d8(&mut spi, CO5300_W_WDBRIGHTNESSVALNOR, 0xA0, &mut spi_cs);
-
-    spi_write_c8d8(
-        &mut spi,
-        CO5300_W_MADCTL,
-        CO5300_MADCTL_COLOR_ORDER,
-        &mut spi_cs,
+        peripherals.DMA_CH0,
+        peripherals.GPIO0,
+        peripherals.GPIO1,
+        peripherals.GPIO2,
+        peripherals.GPIO3,
+        peripherals.GPIO4,
+        peripherals.GPIO5,
     );
-    spi_write_cmd(&mut spi, CO5300_C_INVOFF, &mut spi_cs);
-
-    spi_write_c8d16d16(&mut spi, CO5300_W_CASET, 50 + 22, 70 - 1 + 22, &mut spi_cs);
-    spi_write_c8d16d16(&mut spi, CO5300_W_PASET, 50, 70 - 1, &mut spi_cs);
-    spi_write_cmd(&mut spi, CO5300_W_RAMWR, &mut spi_cs);
-
-    spi_cs.set_low();
-    spi.half_duplex_write(
-        DataMode::Quad,
-        Command::_8Bit(0x32, DataMode::Single),
-        Address::_24Bit(0x003C00, DataMode::Single),
-        0,
-        &[0xCD; 20 * 20],
-    )
-    .unwrap();
-    spi.half_duplex_write(
-        DataMode::Quad,
-        Command::None,
-        Address::None,
-        0,
-        &[0xFF; 20 * 20],
-    )
-    .unwrap();
-    spi_cs.set_high();
+    co5300.init().await;
+    co5300.draw_pixels(0, 0, 410, 502, |px, py| {
+        RGB565::new((((px as f32) / 410.) * 31.) as u16, (((py as f32) / 502.) * 63.) as u16, 31)
+    });
 
     loop {
         info!("Hello world!");
@@ -204,6 +146,23 @@ fn spi_write_c8d16d16(
         Address::_24Bit((cmd as u32) << 8, DataMode::Single),
         0,
         &[(d1 >> 8) as u8, d1 as u8, (d2 >> 8) as u8, d2 as u8],
+    )
+    .unwrap();
+    cs_pin.set_high();
+}
+pub fn send_cmd<const N: usize>(
+    spi: &mut SpiDmaBus<Blocking>,
+    cmd: u8,
+    data: [u8; N],
+    cs_pin: &mut Output,
+) {
+    cs_pin.set_low();
+    spi.half_duplex_write(
+        DataMode::Single,
+        Command::_8Bit(0x02, DataMode::Single),
+        Address::_24Bit((cmd as u32) << 8, DataMode::Single),
+        0,
+        &data,
     )
     .unwrap();
     cs_pin.set_high();
