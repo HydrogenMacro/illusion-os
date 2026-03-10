@@ -8,11 +8,13 @@
 #![deny(clippy::large_stack_frames)]
 
 mod display;
+pub mod wallpaper;
 
 use bt_hci::controller::ExternalController;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
+use esp_bootloader_esp_idf::partitions::*;
 use esp_hal::gpio::*;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::time::Rate;
@@ -23,7 +25,9 @@ use esp_hal::{
     spi::master::{Config as SpiConfig, *},
 };
 use esp_radio::ble::controller::BleConnector;
+use esp_storage::FlashStorage;
 use log::{error, info};
+use embedded_storage::*;
 
 use crate::display::co5300::CO5300;
 use crate::display::color::RGB565;
@@ -72,6 +76,12 @@ async fn main(spawner: Spawner) -> ! {
     //    HostResources::new();
     //let _stack = trouble_host::new(ble_controller, &mut resources);
 
+    let mut flash_storage = FlashStorage::new(peripherals.FLASH);
+    let mut partition_table_data = [0; PARTITION_TABLE_MAX_LEN];
+    let partition_table = read_partition_table(&mut flash_storage, &mut partition_table_data).unwrap();
+    let wallpaper_partition = partition_table.find_partition(PartitionType::Data(DataPartitionSubType::Undefined)).unwrap().unwrap();
+    let mut wallpaper_partition = wallpaper_partition.as_embedded_storage(&mut flash_storage);
+    
     let btn1 = Input::new(
         peripherals.GPIO9,
         InputConfig::default().with_pull(Pull::Down),
@@ -99,10 +109,21 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.GPIO5,
     );
     co5300.init().await;
+    let mut cc = [0; 410 * 2];
+    wallpaper_partition.read(0, &mut cc).unwrap();
+    let mut current_y = 0u32;
     co5300.draw_pixels(0, 0, 410, 502, |px, py| {
-        RGB565::new((((px as f32) / 410.) * 31.) as u16, (((py as f32) / 502.) * 63.) as u16, 31)
+        if current_y != py as u32 {
+            current_y = py as u32;
+            info!("reading {}", 410 * 2 * current_y);
+            wallpaper_partition.read(410 * 2 * current_y as u32, &mut cc).unwrap();
+        }
+        let px_idx = px as usize * 2;
+        //RGB565::new(0, 63, 31)
+        RGB565(u16::from_le_bytes([cc[px_idx], cc[px_idx + 1]]))
     });
-
+    
+    info!("{}", 1);
     loop {
         info!("Hello world!");
         Timer::after(Duration::from_secs(1)).await;

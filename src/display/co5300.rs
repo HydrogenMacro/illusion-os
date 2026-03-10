@@ -77,7 +77,7 @@ impl CO5300 {
 
         self.send_cmd(0xFE, [0x00]);
         self.send_cmd(CO5300_W_SPIMODECTL, [0x80]);
-        self.send_cmd(CO5300_W_PIXFMT, [0x55]);
+        self.send_cmd(CO5300_W_PIXFMT, [0b01010101]);
         self.send_cmd(CO5300_W_WCTRLD1, [0x20]);
         self.send_cmd(CO5300_W_WDBRIGHTNESSVALHBM, [0xFF]);
         self.send_cmd(CO5300_C_DISPON, []);
