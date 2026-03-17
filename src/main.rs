@@ -9,10 +9,13 @@
 
 mod display;
 pub mod wallpaper;
+pub mod flash_storage;
 
 use bt_hci::controller::ExternalController;
+use bytemuck::cast_slice_mut;
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
+use embedded_storage::*;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::partitions::*;
 use esp_hal::gpio::*;
@@ -26,11 +29,15 @@ use esp_hal::{
 };
 use esp_radio::ble::controller::BleConnector;
 use esp_storage::FlashStorage;
+use heapless::Vec;
 use log::{error, info};
-use embedded_storage::*;
 
-use crate::display::co5300::CO5300;
 use crate::display::color::RGB565;
+use crate::display::drivers::co5300::CO5300;
+use crate::display::text::{Anchor, Text, TextChar};
+use crate::display::display_layer::DisplayLayer;
+use crate::flash_storage::FLASH_STORAGE;
+
 //use trouble_host::prelude::*;
 extern crate alloc;
 
@@ -77,11 +84,8 @@ async fn main(spawner: Spawner) -> ! {
     //let _stack = trouble_host::new(ble_controller, &mut resources);
 
     let mut flash_storage = FlashStorage::new(peripherals.FLASH);
-    let mut partition_table_data = [0; PARTITION_TABLE_MAX_LEN];
-    let partition_table = read_partition_table(&mut flash_storage, &mut partition_table_data).unwrap();
-    let wallpaper_partition = partition_table.find_partition(PartitionType::Data(DataPartitionSubType::Undefined)).unwrap().unwrap();
-    let mut wallpaper_partition = wallpaper_partition.as_embedded_storage(&mut flash_storage);
-    
+    FLASH_STORAGE.set(flash_storage);
+
     let btn1 = Input::new(
         peripherals.GPIO9,
         InputConfig::default().with_pull(Pull::Down),
@@ -96,7 +100,7 @@ async fn main(spawner: Spawner) -> ! {
     i2c.write_read(0x34, &[0xA4], &mut a).unwrap();
 
     info!("aaa {:?}", a);
-    
+
     let mut co5300 = CO5300::new(
         peripherals.GPIO11,
         peripherals.SPI2,
@@ -110,81 +114,28 @@ async fn main(spawner: Spawner) -> ! {
     );
     co5300.init().await;
     let mut cc = [0; 410 * 2];
-    wallpaper_partition.read(0, &mut cc).unwrap();
+    FLASH_STORAGE.access().read(0x110000, &mut cc).unwrap();
     let mut current_y = 0u32;
-    co5300.draw_pixels(0, 0, 410, 502, |px, py| {
+
+    let text_buf = [0; 410 * 2];
+    let a = Text::new(100, 100, Anchor::TopLeft, display::text::Font::_0xProto80, RGB565::new(30, 30, 15), Vec::from_array([TextChar::LwrA, TextChar::LwrB, TextChar::LwrC]));
+    info!("text dims: {} x {}", a.width(), a.height());
+    co5300.draw_pixels_with(0, 0, 410, 502, |px, py| {
         if current_y != py as u32 {
             current_y = py as u32;
-            info!("reading {}", 410 * 2 * current_y);
-            wallpaper_partition.read(410 * 2 * current_y as u32, &mut cc).unwrap();
+            FLASH_STORAGE.access()
+                .read(0x110000 + 410 * 2 * current_y as u32, &mut cc)
+                .unwrap();
+            a.draw(cast_slice_mut(&mut cc), py);
         }
         let px_idx = px as usize * 2;
-        //RGB565::new(0, 63, 31)
-        RGB565(u16::from_le_bytes([cc[px_idx], cc[px_idx + 1]]))
+        
+        RGB565(u16::from_be_bytes([cc[px_idx], cc[px_idx + 1]]))
     });
-    
+
     info!("{}", 1);
     loop {
-        info!("Hello world!");
+        //info!("Hello world!");
         Timer::after(Duration::from_secs(1)).await;
     }
-}
-fn spi_write_cmd(spi: &mut SpiDmaBus<Blocking>, cmd: u8, cs_pin: &mut Output) {
-    cs_pin.set_low();
-    spi.half_duplex_write(
-        DataMode::Single,
-        Command::_8Bit(0x02, DataMode::Single),
-        Address::_24Bit((cmd as u32) << 8, DataMode::Single),
-        0,
-        &[],
-    )
-    .unwrap();
-    cs_pin.set_high();
-}
-fn spi_write_c8d8(spi: &mut SpiDmaBus<Blocking>, cmd: u8, d: u8, cs_pin: &mut Output) {
-    cs_pin.set_low();
-    spi.half_duplex_write(
-        DataMode::Single,
-        Command::_8Bit(0x02, DataMode::Single),
-        Address::_24Bit((cmd as u32) << 8, DataMode::Single),
-        0,
-        &[d],
-    )
-    .unwrap();
-    cs_pin.set_high();
-}
-fn spi_write_c8d16d16(
-    spi: &mut SpiDmaBus<Blocking>,
-    cmd: u8,
-    d1: u16,
-    d2: u16,
-    cs_pin: &mut Output,
-) {
-    cs_pin.set_low();
-    spi.half_duplex_write(
-        DataMode::Single,
-        Command::_8Bit(0x02, DataMode::Single),
-        Address::_24Bit((cmd as u32) << 8, DataMode::Single),
-        0,
-        &[(d1 >> 8) as u8, d1 as u8, (d2 >> 8) as u8, d2 as u8],
-    )
-    .unwrap();
-    cs_pin.set_high();
-}
-pub fn send_cmd<const N: usize>(
-    spi: &mut SpiDmaBus<Blocking>,
-    cmd: u8,
-    data: [u8; N],
-    cs_pin: &mut Output,
-) {
-    cs_pin.set_low();
-    spi.half_duplex_write(
-        DataMode::Single,
-        Command::_8Bit(0x02, DataMode::Single),
-        Address::_24Bit((cmd as u32) << 8, DataMode::Single),
-        0,
-        &data,
-    )
-    .unwrap();
-    cs_pin.set_high();
 }

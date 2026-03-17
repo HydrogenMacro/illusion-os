@@ -10,7 +10,7 @@ use esp_hal::{
 use heapless::Vec;
 use log::info;
 
-use crate::display::{co5300_commands::*, color::RGB565};
+use super::{co5300_commands::*, super::color::RGB565};
 
 /// A CO5300 driver implementation
 ///
@@ -40,21 +40,25 @@ impl CO5300 {
     ) -> Self {
         let mut reset_pin = Output::new(reset_pin, Level::High, OutputConfig::default());
         let mut cs_pin = Output::new(cs, Level::High, OutputConfig::default());
-        let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) = esp_hal::dma_buffers!(CO5300::MAX_PIXELS_SENT_AT_ONCE as usize * size_of::<u16>());
+        let (rx_buffer, rx_descriptors, tx_buffer, tx_descriptors) =
+            esp_hal::dma_buffers!(CO5300::MAX_PIXELS_SENT_AT_ONCE as usize * size_of::<u16>());
 
         let dma_rx_buf = esp_hal::dma::DmaRxBuf::new(rx_descriptors, rx_buffer).unwrap();
 
         let dma_tx_buf = esp_hal::dma::DmaTxBuf::new(tx_descriptors, tx_buffer).unwrap();
 
-        let mut spi = Spi::new(spi, SpiConfig::default().with_frequency(Rate::from_mhz(Self::SPI_FREQUENCY_MHZ)))
-            .unwrap()
-            .with_sck(sck)
-            .with_sio0(sio0)
-            .with_sio1(sio1)
-            .with_sio2(sio2)
-            .with_sio3(sio3)
-            .with_dma(dma)
-            .with_buffers(dma_rx_buf, dma_tx_buf);
+        let mut spi = Spi::new(
+            spi,
+            SpiConfig::default().with_frequency(Rate::from_mhz(Self::SPI_FREQUENCY_MHZ)),
+        )
+        .unwrap()
+        .with_sck(sck)
+        .with_sio0(sio0)
+        .with_sio1(sio1)
+        .with_sio2(sio2)
+        .with_sio3(sio3)
+        .with_dma(dma)
+        .with_buffers(dma_rx_buf, dma_tx_buf);
 
         CO5300 {
             spi,
@@ -103,20 +107,29 @@ impl CO5300 {
     ///
     /// For each pixel in the area (amount is), the pixel function is passed with the pixel's absolute screen x and y to produce a color.
     /// For example, to have a constant color, just pass in `|_, _| RGB565::new(...)`, and you can also use them to index a custom buffer
-    pub fn draw_pixels(
+    pub fn draw_pixels_with(
         &mut self,
         rect_x: u16,
         rect_y: u16,
         rect_w: u16,
         rect_h: u16,
-        mut pixel: impl FnMut(u16, u16) -> RGB565,
+        mut pixel_fn: impl FnMut(u16, u16) -> RGB565,
     ) {
         let rect_end_x = rect_x + rect_w - 1;
         let rect_end_y = rect_y + rect_h - 1;
         let mut total_pixels_to_send = rect_w as u32 * rect_h as u32;
         let mut sent_pixels = 0;
-        self.send_cmd(CO5300_W_CASET, cast::<_, [u8; 4]>([(rect_x + Self::COL_OFFSET).to_be(), (rect_end_x + Self::COL_OFFSET).to_be()]));
-        self.send_cmd(CO5300_W_PASET, cast::<_, [u8; 4]>([rect_y.to_be(), rect_end_y.to_be()]));
+        self.send_cmd(
+            CO5300_W_CASET,
+            cast::<_, [u8; 4]>([
+                (rect_x + Self::COL_OFFSET).to_be(),
+                (rect_end_x + Self::COL_OFFSET).to_be(),
+            ]),
+        );
+        self.send_cmd(
+            CO5300_W_PASET,
+            cast::<_, [u8; 4]>([rect_y.to_be(), rect_end_y.to_be()]),
+        );
         self.send_cmd(CO5300_W_RAMWR, []);
         self.cs_pin.set_low();
         // first write has command and address, subsequent writes do not
@@ -125,12 +138,13 @@ impl CO5300 {
             // the amount of pixels currently being sent, has max of buffer size
             let current_tx_pixels_to_send = total_pixels_to_send.min(Self::MAX_PIXELS_SENT_AT_ONCE);
             self.pixel_buf.clear();
-            
+
             for i in 0..current_tx_pixels_to_send {
-                let (px, py) = (rect_x as u32 + (i + sent_pixels) % rect_w as u32, rect_y as u32 + (i + sent_pixels) / rect_w as u32);
-                self.pixel_buf
-                    .push(*pixel(px as u16, py as u16))
-                    .unwrap();
+                let (px, py) = (
+                    rect_x as u32 + (i + sent_pixels) % rect_w as u32,
+                    rect_y as u32 + (i + sent_pixels) / rect_w as u32,
+                );
+                self.pixel_buf.push(*pixel_fn(px as u16, py as u16)).unwrap();
             }
             let (qspi_command, qspi_address) = if is_first_write {
                 is_first_write = false;
