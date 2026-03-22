@@ -10,7 +10,7 @@ use esp_hal::{
 use heapless::Vec;
 use log::info;
 
-use super::{co5300_commands::*, super::color::RGB565};
+use super::{super::color::RGB565, co5300_commands::*};
 
 /// A CO5300 driver implementation
 ///
@@ -20,13 +20,14 @@ pub struct CO5300 {
     pub reset_pin: Output<'static>,
     pub cs_pin: Output<'static>,
     pub pixel_buf: Vec<u16, { Self::MAX_PIXELS_SENT_AT_ONCE as usize }>,
+    
 }
 impl CO5300 {
     pub const MAX_PIXELS_SENT_AT_ONCE: u32 = 1024;
     pub const WIDTH: u16 = 410;
     pub const HEIGHT: u16 = 502;
     pub const COL_OFFSET: u16 = 22;
-    pub const SPI_FREQUENCY_MHZ: u32 = 80;
+    pub const SPI_FREQUENCY_MHZ: u32 = 40;
     pub fn new(
         reset_pin: impl OutputPin + 'static,
         spi: impl SpiInstance + 'static,
@@ -105,6 +106,8 @@ impl CO5300 {
 
     /// Draws on the screen in the rectangle area.
     ///
+    /// rect x, y, width, and height must all be even (co5300 restrictions)
+    /// 
     /// For each pixel in the area (amount is), the pixel function is passed with the pixel's absolute screen x and y to produce a color.
     /// For example, to have a constant color, just pass in `|_, _| RGB565::new(...)`, and you can also use them to index a custom buffer
     pub fn draw_pixels_with(
@@ -115,6 +118,11 @@ impl CO5300 {
         rect_h: u16,
         mut pixel_fn: impl FnMut(u16, u16) -> RGB565,
     ) {
+        debug_assert!(rect_x % 2 == 0);
+        debug_assert!(rect_y % 2 == 0);
+        debug_assert!(rect_w % 2 == 0);
+        debug_assert!(rect_h % 2 == 0);
+
         let rect_end_x = rect_x + rect_w - 1;
         let rect_end_y = rect_y + rect_h - 1;
         let mut total_pixels_to_send = rect_w as u32 * rect_h as u32;
@@ -144,7 +152,9 @@ impl CO5300 {
                     rect_x as u32 + (i + sent_pixels) % rect_w as u32,
                     rect_y as u32 + (i + sent_pixels) / rect_w as u32,
                 );
-                self.pixel_buf.push(*pixel_fn(px as u16, py as u16)).unwrap();
+                self.pixel_buf
+                    .push(*pixel_fn(px as u16, py as u16))
+                    .unwrap();
             }
             let (qspi_command, qspi_address) = if is_first_write {
                 is_first_write = false;
@@ -165,6 +175,67 @@ impl CO5300 {
                 )
                 .unwrap();
             sent_pixels += current_tx_pixels_to_send;
+            total_pixels_to_send -= current_tx_pixels_to_send;
+        }
+        self.cs_pin.set_high();
+    }
+
+    /// rect x, y, width, and height must all be even (co5300 restrictions)
+    pub fn draw_buf(
+        &mut self,
+        rect_x: u16,
+        rect_y: u16,
+        rect_w: u16,
+        rect_h: u16,
+        buf: &[RGB565],
+    ) {
+        debug_assert!(rect_x % 2 == 0);
+        debug_assert!(rect_y % 2 == 0);
+        debug_assert!(rect_w % 2 == 0);
+        debug_assert!(rect_h % 2 == 0);
+        debug_assert!((rect_w * rect_h) as usize == buf.len());
+
+        let rect_end_x = rect_x + rect_w - 1;
+        let rect_end_y = rect_y + rect_h - 1;
+        let mut total_pixels_to_send = rect_w as u32 * rect_h as u32;
+        self.send_cmd(
+            CO5300_W_CASET,
+            cast::<_, [u8; 4]>([
+                (rect_x + Self::COL_OFFSET).to_be(),
+                (rect_end_x + Self::COL_OFFSET).to_be(),
+            ]),
+        );
+        self.send_cmd(
+            CO5300_W_PASET,
+            cast::<_, [u8; 4]>([rect_y.to_be(), rect_end_y.to_be()]),
+        );
+        self.send_cmd(CO5300_W_RAMWR, []);
+        self.cs_pin.set_low();
+        // first write has command and address, subsequent writes do not
+        let mut is_first_write = true;
+        while total_pixels_to_send > 0 {
+            // the amount of pixels currently being sent, has max of buffer size
+            let current_tx_pixels_to_send = total_pixels_to_send.min(Self::MAX_PIXELS_SENT_AT_ONCE);
+            self.pixel_buf.clear();
+            
+            let (qspi_command, qspi_address) = if is_first_write {
+                is_first_write = false;
+                (
+                    Command::_8Bit(0x32, DataMode::Single),
+                    Address::_24Bit(0x003C00, DataMode::Single),
+                )
+            } else {
+                (Command::None, Address::None)
+            };
+            self.spi
+                .half_duplex_write(
+                    DataMode::Quad,
+                    qspi_command,
+                    qspi_address,
+                    0,
+                    cast_slice(&buf),
+                )
+                .unwrap();
             total_pixels_to_send -= current_tx_pixels_to_send;
         }
         self.cs_pin.set_high();

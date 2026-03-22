@@ -11,6 +11,8 @@ def main():
     rgb565_data = [(int(r*31/255)<<11)|(int(g*63/255)<<5)|int(b*31/255) for (r,g,b) in batched(rgb_data,3)]
     with open(output_file_path, "wb") as f:
         bin = array("H", rgb565_data) 
+        if sys.byteorder == "little":
+            bin.byteswap()
         f.write(bin.tobytes())        
 
 if __name__ == "__main__":

@@ -6,20 +6,26 @@ pub struct FlashStorage(UnsafeCell<Option<esp_storage::FlashStorage<'static>>>);
 
 unsafe impl Sync for FlashStorage {}
 impl FlashStorage {
+    fn is_busy(&self) -> bool {
+        FLASH_STORAGE_ACCESS_ACTIVE.load(Ordering::SeqCst)
+    }
+    fn set_is_busy(&self, is_busy: bool) {
+        FLASH_STORAGE_ACCESS_ACTIVE.store(is_busy, Ordering::SeqCst);
+    }
     pub fn set(&self, flash_storage: esp_storage::FlashStorage<'static>) {
-        if FLASH_STORAGE_ACCESS_ACTIVE.load(Ordering::SeqCst) {
+        if self.is_busy() {
             panic!("flash access active when setting");
         }
-        FLASH_STORAGE_ACCESS_ACTIVE.store(true, Ordering::SeqCst);
+        self.set_is_busy(true);
         unsafe { *self.0.get() = Some(flash_storage); }
-        FLASH_STORAGE_ACCESS_ACTIVE.store(false, Ordering::SeqCst);
+        self.set_is_busy(false);
     }
     pub fn access(&self) -> FlashStorageGuard<'_> {
-        if !FLASH_STORAGE_ACCESS_ACTIVE.load(Ordering::SeqCst) {
-            unsafe { FlashStorageGuard::new((*self.0.get()).as_mut().unwrap()) }
-        } else {
+        if self.is_busy() {
             panic!("access already active");
         }
+        self.set_is_busy(true);
+        unsafe { FlashStorageGuard::new((*self.0.get()).as_mut().unwrap()) }
     }
 }
 
@@ -33,7 +39,7 @@ impl<'a> FlashStorageGuard<'a> {
 }
 impl Drop for FlashStorageGuard<'_> {
     fn drop(&mut self) {
-        FLASH_STORAGE_ACCESS_ACTIVE.store(false,Ordering::SeqCst);
+        FLASH_STORAGE.set_is_busy(false);
     }
 }
 static FLASH_STORAGE_ACCESS_ACTIVE: AtomicBool = AtomicBool::new(false);

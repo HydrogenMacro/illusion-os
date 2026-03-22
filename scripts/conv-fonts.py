@@ -34,13 +34,9 @@ def main():
     except: pass
     with open(processed_font_path, "wb") as f:
         for (i, char) in enumerate(font_chars):
-            escaped_char = char
-            if char == "'" or char == "\"":
-                escaped_char = "\\" + char
-            char_img_data = subprocess.run(["magick", "-pointsize", font_size, "-font", font_path, f"label:{escaped_char}",
+            char_img_data = subprocess.run(["magick", "-pointsize", font_size, "-fill", "white", "-background", "black", "-font", font_path, f"label:{char}",
                 "-depth", "8", "gray:-"
             ], capture_output=True).stdout
-            print(len(char_img_data))
             f.write(char_img_data)
 
 
