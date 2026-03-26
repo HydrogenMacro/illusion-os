@@ -1,3 +1,4 @@
+#![allow(unused)]
 macro_rules! translate_defines {
     ($(#define $cmd:ident $val:expr)+) => {
         $(

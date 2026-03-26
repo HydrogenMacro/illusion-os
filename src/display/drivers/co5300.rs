@@ -20,6 +20,7 @@ pub struct CO5300 {
     pub reset_pin: Output<'static>,
     pub cs_pin: Output<'static>,
     pub pixel_buf: Vec<u16, { Self::MAX_PIXELS_SENT_AT_ONCE as usize }>,
+    pub display_off: bool
     
 }
 impl CO5300 {
@@ -66,6 +67,7 @@ impl CO5300 {
             cs_pin,
             reset_pin,
             pixel_buf: Vec::new(),
+            display_off: false
         }
     }
 
@@ -239,5 +241,16 @@ impl CO5300 {
             total_pixels_to_send -= current_tx_pixels_to_send;
         }
         self.cs_pin.set_high();
+    }
+
+    pub fn display_off(&mut self) {
+        self.display_off = true;
+        //info!("disp off");
+        self.send_cmd(CO5300_C_DISPOFF, []);
+    }
+    pub fn display_on(&mut self) {
+        self.display_off = false;
+        //info!("disp on");
+        self.send_cmd(CO5300_C_DISPON, []);
     }
 }

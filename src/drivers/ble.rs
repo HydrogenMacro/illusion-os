@@ -16,10 +16,8 @@ pub struct WatchGATTServer {
     pub time_query_service: TimeQueryService,
 }
 
-/// Battery service
 #[gatt_service(uuid = service::BATTERY)]
 pub struct BatteryService {
-    /// Battery Level
     #[descriptor(uuid = descriptors::VALID_RANGE, read, value = [0, 100])]
     #[descriptor(uuid = descriptors::MEASUREMENT_DESCRIPTION, name = "battery_level", read, value = "Battery Level")]
     #[characteristic(uuid = characteristic::BATTERY_LEVEL, read, notify)]

@@ -10,21 +10,33 @@
 mod display;
 pub mod drivers;
 pub mod flash_storage;
-pub mod wallpaper;
 
+use crate::display::color::RGB565;
+use crate::display::drivers::co5300::CO5300;
+use crate::display::objects::text::{Anchor, Font, Text, TextChar, TextString};
+use crate::drivers::axp2101::Axp2101;
+use crate::drivers::ble::WatchGATTServer;
+use crate::drivers::i2c_bus::I2cBus;
+use crate::drivers::pcf85063a::PCF85063A;
+use crate::flash_storage::FLASH_STORAGE;
 use alloc::rc::Rc;
 use bt_hci::controller::ExternalController;
 use bytemuck::cast_slice_mut;
+use core::cell::RefCell;
+use display::objects::DisplayLayer;
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
+use embassy_futures::join::{join, join3};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Instant, Timer};
+use embedded_storage::ReadStorage;
 use esp_backtrace as _;
 use esp_bootloader_esp_idf::partitions::*;
-use esp_hal::gpio::*;
+use esp_hal::gpio::interconnect::PeripheralInput;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
-use esp_hal::peripherals::BT;
+use esp_hal::peripherals::{BT, LPWR};
+use esp_hal::rtc_cntl::Rtc;
 use esp_hal::time::Rate;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::{
@@ -32,23 +44,12 @@ use esp_hal::{
     clock::CpuClock,
     spi::master::{Config as SpiConfig, *},
 };
+use esp_hal::{gpio::*, system};
 use esp_radio::ble::Config as BleConfig;
 use esp_radio::ble::controller::BleConnector;
 use heapless::Vec;
 use log::{error, info, warn};
 use trouble_host::{Address, prelude::*};
-
-use crate::display::color::RGB565;
-use crate::display::display_layer::DisplayLayer;
-use crate::display::drivers::co5300::CO5300;
-use crate::display::text::{Anchor, Text, TextChar, TextString};
-use crate::drivers::ble::WatchGATTServer;
-use crate::drivers::i2c_bus::I2cBus;
-use crate::drivers::pcf85063a::PCF85063A;
-use crate::flash_storage::FLASH_STORAGE;
-use core::cell::RefCell;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embedded_storage::ReadStorage;
 //use trouble_host::prelude::*;
 extern crate alloc;
 
@@ -62,15 +63,12 @@ esp_bootloader_esp_idf::esp_app_desc!();
 )]
 #[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
-    // generator version: 1.2.0
-
     esp_println::logger::init_logger_from_env();
 
-    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    let config = esp_hal::Config::default().with_cpu_clock(CpuClock::_80MHz);
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 65536);
-    // COEX needs more RAM - so we've added some more
     esp_alloc::heap_allocator!(size: 64 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
@@ -84,11 +82,6 @@ async fn main(spawner: Spawner) -> ! {
 
     FLASH_STORAGE.set(flash_storage);
 
-    let btn1 = Input::new(
-        peripherals.GPIO9,
-        InputConfig::default().with_pull(Pull::Down),
-    );
-
     let i2c = I2cBus::new(
         I2c::new(peripherals.I2C0, I2cConfig::default())
             .unwrap()
@@ -96,12 +89,13 @@ async fn main(spawner: Spawner) -> ! {
             .with_sda(peripherals.GPIO8),
     );
     let mut rtc = Rc::new(RefCell::new(PCF85063A::new(i2c.clone())));
+    let mut battery = Rc::new(RefCell::new(Axp2101::new(i2c.clone())));
 
     spawner
-        .spawn(run_ble(peripherals.BT, i2c.clone(), rtc.clone()))
+        .spawn(run_ble(peripherals.BT, battery.clone(), rtc.clone()))
         .unwrap();
 
-    let mut co5300 = CO5300::new(
+    let mut co5300 = Rc::new(RefCell::new(CO5300::new(
         peripherals.GPIO11,
         peripherals.SPI2,
         peripherals.DMA_CH0,
@@ -111,18 +105,30 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.GPIO3,
         peripherals.GPIO4,
         peripherals.GPIO5,
-    );
-    co5300.init().await;
+    )));
+    co5300.borrow_mut().init().await;
 
+    spawner
+        .spawn(boot_btn_task(
+            peripherals.GPIO9.into(),
+            peripherals.LPWR,
+            co5300.clone(),
+        ))
+        .unwrap();
+
+    let mut scene: Vec<display::objects::DisplayObject, 10> = Vec::new();
     let mut time_text = Text::new(
         CO5300::WIDTH / 2,
         CO5300::HEIGHT / 2,
         Anchor::Center,
-        display::text::Font::_0xProto120,
+        Font::_0xProto120,
         |bg_color| bg_color.overlayed_with(RGB565::BLACK, 150),
     );
-
     loop {
+        if co5300.borrow().display_off {
+            Timer::after_millis(100).await;
+            continue;
+        }
         let rtc = rtc.borrow();
         let (time_hour_tens, time_hour_ones) = rtc.get_hour();
         let (time_min_tens, time_min_ones) = rtc.get_minute();
@@ -149,7 +155,12 @@ async fn main(spawner: Spawner) -> ! {
             time_text.draw(&mut draw_row_buf[0..410], draw_cursor_y);
             time_text.draw(&mut draw_row_buf[410..410 * 2], draw_cursor_y + 1);
             //co5300.draw_pixels_with(0, draw_cursor_y, CO5300::WIDTH, 2, |x, y| draw_row_buf[((y - draw_cursor_y) * CO5300::WIDTH) as usize + x as usize]);
-            co5300.draw_buf(0, draw_cursor_y, CO5300::WIDTH, 2, &draw_row_buf);
+            co5300
+                .borrow_mut()
+                .draw_buf(0, draw_cursor_y, CO5300::WIDTH, 2, &draw_row_buf);
+            for a in &scene {
+                a.draw(&mut draw_row_buf[..], draw_cursor_y);
+            }
         }
         /*
         info!(
@@ -157,12 +168,30 @@ async fn main(spawner: Spawner) -> ! {
             Instant::now().duration_since(draw_start_time).as_millis()
         );
         */
-        Timer::after_millis(20).await;
+        Timer::after_millis(500).await;
     }
 }
 
 #[embassy_executor::task]
-async fn run_ble(bt: BT<'static>, i2c: I2cBus, rtc: Rc<RefCell<PCF85063A>>) {
+async fn boot_btn_task(btn_gpio: AnyPin<'static>, lpwr: LPWR<'static>, co5300: Rc<RefCell<CO5300>>) {
+    let mut boot_btn = Input::new(btn_gpio, InputConfig::default().with_pull(Pull::Down));
+    let mut rtc = Rtc::new(lpwr);
+    let mut display_is_on = true;
+    loop {
+        boot_btn.wait_for_rising_edge().await;
+        info!("hi");
+        if display_is_on {
+            co5300.borrow_mut().display_off();
+        } else {
+            co5300.borrow_mut().display_on();
+        }
+        display_is_on = !display_is_on;
+        boot_btn.wait_for_falling_edge().await;
+        info!("lo");
+    }
+}
+#[embassy_executor::task]
+async fn run_ble(bt: BT<'static>, battery: Rc<RefCell<Axp2101>>, rtc: Rc<RefCell<PCF85063A>>) {
     let radio_init = esp_radio::init().expect("Failed to initialize Wi-Fi/BLE controller");
     /*
     let (mut _wifi_controller, _interfaces) =
@@ -188,95 +217,104 @@ async fn run_ble(bt: BT<'static>, i2c: I2cBus, rtc: Rc<RefCell<PCF85063A>>) {
     }))
     .unwrap();
 
-    let mut battery_pct = [0; 1];
-    i2c.try_access()
-        .map(|mut i2c| i2c.write_read(0x34, &[0xA4], &mut battery_pct).unwrap())
-        .unwrap();
-    gatt_server
-        .battery_service
-        .level
-        .set(&gatt_server, &battery_pct[0])
-        .unwrap();
     let ble_advertisement_params = AdvertisementParameters {
         ..Default::default()
     };
 
     let mut advertiser_data = [0; 64];
-    let _ = join(runner.run(), async {
-        let len = AdStructure::encode_slice(
-            &[
-                AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
-                AdStructure::ServiceUuids16(&[
-                    service::BATTERY.to_le_bytes(),
-                    service::CURRENT_TIME.to_le_bytes(),
-                ]),
-                AdStructure::CompleteLocalName(b"Omicron"),
-            ],
-            &mut advertiser_data[..],
-        )
-        .unwrap();
-
-        let advertiser = peripheral
-            .advertise(
-                &ble_advertisement_params,
-                Advertisement::ConnectableScannableUndirected {
-                    adv_data: &advertiser_data[0..len],
-                    scan_data: &[],
-                },
+    let _ = join3(
+        runner.run(),
+        async {
+            loop {
+                gatt_server
+                    .battery_service
+                    .level
+                    .set(&gatt_server, &battery.borrow_mut().get_battery_pct())
+                    .unwrap();
+                Timer::after_millis(5000).await;
+            }
+        },
+        async {
+            let len = AdStructure::encode_slice(
+                &[
+                    AdStructure::Flags(LE_GENERAL_DISCOVERABLE | BR_EDR_NOT_SUPPORTED),
+                    AdStructure::ServiceUuids16(&[
+                        service::BATTERY.to_le_bytes(),
+                        service::CURRENT_TIME.to_le_bytes(),
+                    ]),
+                    AdStructure::CompleteLocalName(b"Omicron"),
+                ],
+                &mut advertiser_data[..],
             )
-            .await
             .unwrap();
+            loop {
+                let advertiser = peripheral
+                    .advertise(
+                        &ble_advertisement_params,
+                        Advertisement::ConnectableScannableUndirected {
+                            adv_data: &advertiser_data[0..len],
+                            scan_data: &[],
+                        },
+                    )
+                    .await
+                    .unwrap();
 
-        let conn: GattConnection<_> = advertiser
-            .accept()
-            .await
-            .unwrap()
-            .with_attribute_server(&gatt_server)
-            .unwrap();
+                let conn: GattConnection<_> = advertiser
+                    .accept()
+                    .await
+                    .unwrap()
+                    .with_attribute_server(&gatt_server)
+                    .unwrap();
 
-        loop {
-            match conn.next().await {
-                GattConnectionEvent::Disconnected { reason } => {
-                    info!("disconnected: {:?}", reason);
-                    break;
-                }
-                GattConnectionEvent::Gatt { event } => {
-                    match &event {
-                        GattEvent::Read(event) => {
-                            if event.handle() == gatt_server.battery_service.level.handle {
-                                info!("battery read");
-                            }
-                            if event.handle() == gatt_server.time_query_service.current_time.handle
-                            {
-                                info!("current time read");
-                            }
+                loop {
+                    match conn.next().await {
+                        GattConnectionEvent::Disconnected { reason } => {
+                            info!("disconnected: {:?}", reason);
+                            break;
                         }
-                        GattEvent::Write(write_event) => {
-                            if write_event.handle() == gatt_server.battery_service.level.handle {
-                                info!("battery wrote");
-                            }
-                            if write_event.handle() == gatt_server.time_query_service.current_time.handle
-                            {
-                                Timer::after_millis(500).await;
-                                let val = gatt_server
-                                    .get(&gatt_server.time_query_service.current_time)
-                                    .unwrap();
-                                info!("current time wrote {:?}", val);
-                                if val != 0 {
-                                    rtc.borrow().set_from_unix_epoch(val);
+                        GattConnectionEvent::Gatt { event } => {
+                            match &event {
+                                GattEvent::Read(event) => {
+                                    if event.handle() == gatt_server.battery_service.level.handle {
+                                        info!("battery read");
+                                    }
+                                    if event.handle()
+                                        == gatt_server.time_query_service.current_time.handle
+                                    {
+                                        info!("current time read");
+                                    }
                                 }
+                                GattEvent::Write(write_event) => {
+                                    if write_event.handle()
+                                        == gatt_server.battery_service.level.handle
+                                    {
+                                        info!("battery wrote");
+                                    }
+                                    if write_event.handle()
+                                        == gatt_server.time_query_service.current_time.handle
+                                    {
+                                        Timer::after_millis(500).await;
+                                        let val = gatt_server
+                                            .get(&gatt_server.time_query_service.current_time)
+                                            .unwrap();
+                                        info!("current time wrote {:?}", val);
+                                        if val != 0 {
+                                            rtc.borrow().set_from_unix_epoch(val);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            match event.accept() {
+                                Ok(reply) => reply.send().await,
+                                Err(e) => warn!("accept error: {e:?}"),
                             }
                         }
                         _ => {}
                     }
-                    match event.accept() {
-                        Ok(reply) => reply.send().await,
-                        Err(e) => warn!("accept error: {e:?}"),
-                    }
                 }
-                _ => {}
             }
-        }
-    })
+        },
+    )
     .await;
 }

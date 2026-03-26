@@ -8,7 +8,7 @@ use log::*;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    display::{color::RGB565, display_layer::DisplayLayer},
+    display::{color::RGB565, objects::DisplayLayer},
     flash_storage::FLASH_STORAGE,
 };
 
@@ -197,7 +197,7 @@ pub enum Anchor {
     Center,
 }
 impl DisplayLayer for Text {
-    fn draw(&self, line_buf: &mut [super::color::RGB565], line_buf_y: u16) {
+    fn draw(&self, line_buf: &mut [RGB565], line_buf_y: u16) {
         let mut char_data_buf = [0; 410];
         let char_width = self.font.data().char_width as usize;
         let (text_x, text_y) = self.position();
