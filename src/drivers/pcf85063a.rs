@@ -41,7 +41,6 @@ impl PCF85063A {
     pub fn set_hour(&self, hour: u8) {
         debug_assert!(hour < 23);
         let (tens, ones) = (hour / 10, hour % 10);
-        info!("{tens} {ones}");
         if let Some(mut i2c) = self.i2c.try_access() {
             i2c.write(PCF85063A::ADDRESS, &[0x06, ones | (tens << 4)])
                 .unwrap();
@@ -80,8 +79,8 @@ impl PCF85063A {
     pub fn set_from_unix_epoch(&self, unix_epoch: i64) {
         let date_time: DateTime<FixedOffset> = DateTime::from_timestamp_secs(unix_epoch)
             .unwrap()
-            // timezone is -1 cuz i cbb to deal with daylight savings
-            .with_timezone(&TimeZone::from_offset(&FixedOffset::east_opt((self.timezone_utc_offset_hrs - 1) * 3600).unwrap()));
+            // timezone is +1 cuz i cbb to deal with daylight savings
+            .with_timezone(&TimeZone::from_offset(&FixedOffset::east_opt((self.timezone_utc_offset_hrs + 1) * 3600).unwrap()));
         self.set_second(date_time.second() as u8);
         self.set_minute(date_time.minute() as u8);
         self.set_hour(date_time.hour() as u8);

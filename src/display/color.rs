@@ -41,6 +41,9 @@ impl RGB565 {
             alpha_blend(self.blue(), overlayed_color.blue(), alpha),
         )
     }
+    pub fn invert(&self) -> RGB565 {
+        RGB565::new(31 - self.red(), 64 - self.green(), 31 - self.blue())
+    }
 }
 
 /// for blending individual channels

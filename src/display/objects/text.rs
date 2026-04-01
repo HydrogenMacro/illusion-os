@@ -19,23 +19,25 @@ pub struct FontData {
 }
 
 pub enum Font {
-    _0xProto80,
-    _0xProto120,
+    Font1,
+    Font2,
+    Font3
 }
 
 impl Font {
     pub const fn data(&self) -> FontData {
         match self {
-            Font::_0xProto80 => FontData {
-                char_width: 51,
-                char_height: 127,
+            Font::Font1 => FontData {
+                char_width: 73,
+                char_height: 144,
                 offset: 0x210000,
             },
-            Font::_0xProto120 => FontData {
+            Font::Font2 => FontData {
                 char_width: 76,
                 char_height: 189,
                 offset: 0x260000,
             },
+            Font::Font3 => FontData { offset: 0x310000, char_width: 65, char_height: 164 }
         }
     }
     // data_buf should have len of >= 100

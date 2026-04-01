@@ -9,7 +9,7 @@ impl I2cBus {
     pub fn new(i2c: I2c<'static, Blocking>) -> Self {
         I2cBus(Rc::new(RefCell::new(i2c)))
     }
-    pub fn try_access(&self) -> Option<impl DerefMut<Target = I2c<'static, Blocking>>> {
+    pub fn try_access(&self) -> Option<impl DerefMut<Target = I2c<'static, Blocking>> + use<'_>> {
         self.0.try_borrow_mut().ok()
     }
 }

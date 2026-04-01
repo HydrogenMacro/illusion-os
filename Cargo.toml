@@ -65,6 +65,7 @@ embassy-futures = { version = "0.1.2", features = ["log"] }
 embassy-sync = { version = "0.7.0", features = ["log"] }
 chrono = { version = "0.4.44", default-features = false }
 ambassador = "0.5.0"
+multiconst = "0.2.2"
 
 
 [profile.dev]

@@ -21,16 +21,15 @@ cargo run --release
 ```
 
 ### Changing the wallpaper
-The wallpaper image will be centered and cropped so that it fits the screen. This uses imagemagick, so all common image formats can be passed
+The wallpaper image will be centered and cropped so that it fits the screen. This uses imagemagick, so all common image formats can be passed. The image must be in `./assets/wallpapers`, which is where the command's argument is relative to.
 ```
-just upload-wallpaper <path/to/wallpaper.png>
+just upload-wallpaper <wallpaper.png>
 ```
 ### Changing the font
 A font size of around 120 is recommended for the time display.
-The fourth argument is to be a hard-coded 0x260000 for now; This is in preparation for the possibility of multiple fonts in different addresses in the future.
+The fourth argument is to be a hard-coded 0x260000 for now; This is in preparation for the possibility of multiple fonts in different addresses in the future. This also uses imagemagick, so most common font formats should be supported. The font file must be in `./assets/fonts`, which is where the command's font file argument is relative to.
 ```
-# This requires
-just upload-font <path/to/font.ttf> <font-size> 0x260000
+just upload-font <font.ttf> <font-size> 0x260000
 ```
 
 ### Synchronizing the time through BLE

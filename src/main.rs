@@ -6,16 +6,20 @@
     holding buffers for the duration of a data transfer."
 )]
 #![deny(clippy::large_stack_frames)]
+//#![feature(generic_const_exprs)]
+#![allow(incomplete_features)]
 
 mod display;
 pub mod drivers;
 pub mod flash_storage;
+pub mod input_matrix;
 
 use crate::display::color::RGB565;
 use crate::display::drivers::co5300::CO5300;
 use crate::display::objects::text::{Anchor, Font, Text, TextChar, TextString};
 use crate::drivers::axp2101::Axp2101;
 use crate::drivers::ble::WatchGATTServer;
+use crate::drivers::ft3168::FT3168;
 use crate::drivers::i2c_bus::I2cBus;
 use crate::drivers::pcf85063a::PCF85063A;
 use crate::flash_storage::FLASH_STORAGE;
@@ -52,7 +56,7 @@ use log::{error, info, warn};
 use trouble_host::{Address, prelude::*};
 //use trouble_host::prelude::*;
 extern crate alloc;
-
+use input_matrix::input_matrix_task;
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -83,14 +87,16 @@ async fn main(spawner: Spawner) -> ! {
     FLASH_STORAGE.set(flash_storage);
 
     let i2c = I2cBus::new(
-        I2c::new(peripherals.I2C0, I2cConfig::default())
+        I2c::new(peripherals.I2C0, I2cConfig::default().with_frequency(Rate::from_khz(10)))
             .unwrap()
             .with_scl(peripherals.GPIO7)
             .with_sda(peripherals.GPIO8),
     );
     let mut rtc = Rc::new(RefCell::new(PCF85063A::new(i2c.clone())));
     let mut battery = Rc::new(RefCell::new(Axp2101::new(i2c.clone())));
+    let touch_controller = Rc::new(RefCell::new(FT3168::new(i2c.clone(), peripherals.GPIO10.into(), peripherals.GPIO15.into())));
 
+    spawner.spawn(input_matrix_task(touch_controller.clone())).unwrap();
     spawner
         .spawn(run_ble(peripherals.BT, battery.clone(), rtc.clone()))
         .unwrap();
@@ -121,8 +127,8 @@ async fn main(spawner: Spawner) -> ! {
         CO5300::WIDTH / 2,
         CO5300::HEIGHT / 2,
         Anchor::Center,
-        Font::_0xProto120,
-        |bg_color| bg_color.overlayed_with(RGB565::BLACK, 150),
+        Font::Font3,
+        |bg_color| bg_color.invert().overlayed_with(RGB565::WHITE, 70),// bg_color.overlayed_with(RGB565::BLACK, 150),
     );
     loop {
         if co5300.borrow().display_off {
@@ -164,7 +170,7 @@ async fn main(spawner: Spawner) -> ! {
         }
         /*
         info!(
-            "a {:?}",
+            "frame time {:?}",
             Instant::now().duration_since(draw_start_time).as_millis()
         );
         */
@@ -172,14 +178,19 @@ async fn main(spawner: Spawner) -> ! {
     }
 }
 
+
 #[embassy_executor::task]
-async fn boot_btn_task(btn_gpio: AnyPin<'static>, lpwr: LPWR<'static>, co5300: Rc<RefCell<CO5300>>) {
+async fn boot_btn_task(
+    btn_gpio: AnyPin<'static>,
+    lpwr: LPWR<'static>,
+    co5300: Rc<RefCell<CO5300>>,
+) {
     let mut boot_btn = Input::new(btn_gpio, InputConfig::default().with_pull(Pull::Down));
     let mut rtc = Rtc::new(lpwr);
     let mut display_is_on = true;
     loop {
         boot_btn.wait_for_rising_edge().await;
-        info!("hi");
+        info!("boot btn hi");
         if display_is_on {
             co5300.borrow_mut().display_off();
         } else {
@@ -187,7 +198,7 @@ async fn boot_btn_task(btn_gpio: AnyPin<'static>, lpwr: LPWR<'static>, co5300: R
         }
         display_is_on = !display_is_on;
         boot_btn.wait_for_falling_edge().await;
-        info!("lo");
+        info!("boot btn lo");
     }
 }
 #[embassy_executor::task]
