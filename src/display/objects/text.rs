@@ -8,7 +8,7 @@ use log::*;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    display::{color::RGB565, objects::DisplayLayer},
+    display::{color::RGB565, objects::Drawable},
     flash_storage::FLASH_STORAGE,
 };
 
@@ -21,7 +21,7 @@ pub struct FontData {
 pub enum Font {
     Font1,
     Font2,
-    Font3
+    Font3,
 }
 
 impl Font {
@@ -37,7 +37,11 @@ impl Font {
                 char_height: 189,
                 offset: 0x260000,
             },
-            Font::Font3 => FontData { offset: 0x310000, char_width: 65, char_height: 164 }
+            Font::Font3 => FontData {
+                offset: 0x310000,
+                char_width: 65,
+                char_height: 164,
+            },
         }
     }
     // data_buf should have len of >= 100
@@ -198,32 +202,33 @@ pub enum Anchor {
     TopLeft,
     Center,
 }
-impl DisplayLayer for Text {
-    fn draw(&self, line_buf: &mut [RGB565], line_buf_y: u16) {
+impl Drawable for Text {
+    fn draw(&self, line_buf: &mut [RGB565; 410], line_buf_y: u16) {
         let mut char_data_buf = [0; 410];
         let char_width = self.font.data().char_width as usize;
         let (text_x, text_y) = self.position();
-        if line_buf_y >= text_y && line_buf_y < text_y + self.height() {
-            for (i, &text_char) in self.content.iter().enumerate() {
-                let char_x = text_x as usize + char_width * i;
-                if char_x >= 410 {
+        if !(line_buf_y >= text_y && line_buf_y < text_y + self.height()) {
+            return;
+        }
+        for (i, &text_char) in self.content.iter().enumerate() {
+            let char_x = text_x as usize + char_width * i;
+            if char_x >= 410 {
+                break;
+            }
+            self.font
+                .get_char_data(text_char, &mut char_data_buf, line_buf_y - text_y);
+
+            for cursor_char_x in 0..char_width {
+                let cursor_x = char_x + cursor_char_x;
+                if cursor_x >= 410 {
                     break;
                 }
-                self.font
-                    .get_char_data(text_char, &mut char_data_buf, line_buf_y - text_y);
-
-                for cursor_char_x in 0..char_width {
-                    let cursor_x = char_x + cursor_char_x;
-                    if cursor_x >= 410 {
-                        break;
-                    }
-                    if char_data_buf[cursor_char_x] == 0 {
-                    } else {
-                        line_buf[cursor_x] = line_buf[cursor_x].overlayed_with(
-                            (self.color)(line_buf[cursor_x]),
-                            255 - char_data_buf[cursor_char_x],
-                        );
-                    }
+                if char_data_buf[cursor_char_x] == 0 {
+                } else {
+                    line_buf[cursor_x] = line_buf[cursor_x].overlayed_with(
+                        (self.color)(line_buf[cursor_x]),
+                        255 - char_data_buf[cursor_char_x],
+                    );
                 }
             }
         }

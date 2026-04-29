@@ -8,14 +8,19 @@
 #![deny(clippy::large_stack_frames)]
 //#![feature(generic_const_exprs)]
 #![allow(incomplete_features)]
+#![feature(iter_map_windows)]
+#![feature(str_as_str)]
 
 mod display;
 pub mod drivers;
+pub mod scenes;
 pub mod flash_storage;
 pub mod input_matrix;
+pub mod utils;
 
 use crate::display::color::RGB565;
 use crate::display::drivers::co5300::CO5300;
+use crate::display::objects::shape::Rect;
 use crate::display::objects::text::{Anchor, Font, Text, TextChar, TextString};
 use crate::drivers::axp2101::Axp2101;
 use crate::drivers::ble::WatchGATTServer;
@@ -23,11 +28,12 @@ use crate::drivers::ft3168::FT3168;
 use crate::drivers::i2c_bus::I2cBus;
 use crate::drivers::pcf85063a::PCF85063A;
 use crate::flash_storage::FLASH_STORAGE;
+use crate::input_matrix::driver::{InputMatrixDriver, input_matrix_task};
 use alloc::rc::Rc;
 use bt_hci::controller::ExternalController;
 use bytemuck::cast_slice_mut;
 use core::cell::RefCell;
-use display::objects::DisplayLayer;
+use display::objects::Drawable;
 use embassy_executor::Spawner;
 use embassy_futures::join::{join, join3};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -56,7 +62,7 @@ use log::{error, info, warn};
 use trouble_host::{Address, prelude::*};
 //use trouble_host::prelude::*;
 extern crate alloc;
-use input_matrix::input_matrix_task;
+
 // This creates a default app-descriptor required by the esp-idf bootloader.
 // For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -87,16 +93,26 @@ async fn main(spawner: Spawner) -> ! {
     FLASH_STORAGE.set(flash_storage);
 
     let i2c = I2cBus::new(
-        I2c::new(peripherals.I2C0, I2cConfig::default().with_frequency(Rate::from_khz(10)))
-            .unwrap()
-            .with_scl(peripherals.GPIO7)
-            .with_sda(peripherals.GPIO8),
+        I2c::new(
+            peripherals.I2C0,
+            I2cConfig::default().with_frequency(Rate::from_khz(10)),
+        )
+        .unwrap()
+        .with_scl(peripherals.GPIO7)
+        .with_sda(peripherals.GPIO8),
     );
     let mut rtc = Rc::new(RefCell::new(PCF85063A::new(i2c.clone())));
     let mut battery = Rc::new(RefCell::new(Axp2101::new(i2c.clone())));
-    let touch_controller = Rc::new(RefCell::new(FT3168::new(i2c.clone(), peripherals.GPIO10.into(), peripherals.GPIO15.into())));
+    let touch_controller = Rc::new(RefCell::new(FT3168::new(
+        i2c.clone(),
+        peripherals.GPIO10.into(),
+        peripherals.GPIO15.into(),
+    )));
+    let input_matrix_driver = Rc::new(RefCell::new(InputMatrixDriver::new()));
 
-    spawner.spawn(input_matrix_task(touch_controller.clone())).unwrap();
+    spawner
+        .spawn(input_matrix_task(touch_controller.clone(), input_matrix_driver.clone()))
+        .unwrap();
     spawner
         .spawn(run_ble(peripherals.BT, battery.clone(), rtc.clone()))
         .unwrap();
@@ -122,14 +138,15 @@ async fn main(spawner: Spawner) -> ! {
         ))
         .unwrap();
 
-    let mut scene: Vec<display::objects::DisplayObject, 10> = Vec::new();
+    let mut scene: Vec<display::objects::DrawableItem, 10> = Vec::new();
     let mut time_text = Text::new(
         CO5300::WIDTH / 2,
         CO5300::HEIGHT / 2,
         Anchor::Center,
         Font::Font3,
-        |bg_color| bg_color.invert().overlayed_with(RGB565::WHITE, 70),// bg_color.overlayed_with(RGB565::BLACK, 150),
+        |bg_color| bg_color.invert().overlayed_with(RGB565::WHITE, 70), // bg_color.overlayed_with(RGB565::BLACK, 150),
     );
+    let mut rect = Rect::new_rounded(40, 40, 80, 80, 40, RGB565::BLUE, 170);
     loop {
         if co5300.borrow().display_off {
             Timer::after_millis(100).await;
@@ -149,25 +166,30 @@ async fn main(spawner: Spawner) -> ! {
 
         //time_text.content.push_bytestr(&[time_secs_ones + b'0']);
         let draw_start_time = Instant::now();
-        let mut draw_row_buf = [RGB565::BLACK; 410 * 2];
+        let mut draw_buf = [RGB565::BLACK; 410 * 2];
         for draw_cursor_y in (0..CO5300::HEIGHT).step_by(2) {
             FLASH_STORAGE
                 .access()
                 .read(
-                    0x110000 + 410 * 2 * draw_cursor_y as u32,
-                    cast_slice_mut(&mut draw_row_buf),
+                    0x110000 + CO5300::WIDTH as u32 * 2 * draw_cursor_y as u32,
+                    cast_slice_mut(&mut draw_buf),
                 )
                 .unwrap();
-            time_text.draw(&mut draw_row_buf[0..410], draw_cursor_y);
-            time_text.draw(&mut draw_row_buf[410..410 * 2], draw_cursor_y + 1);
+            for (i, line_buf) in draw_buf.as_chunks_mut::<{ CO5300::WIDTH as usize }>().0.iter_mut().enumerate() {
+                time_text.draw(line_buf, draw_cursor_y + i as u16);
+                rect.draw(line_buf, draw_cursor_y + i as u16);
+            }
             //co5300.draw_pixels_with(0, draw_cursor_y, CO5300::WIDTH, 2, |x, y| draw_row_buf[((y - draw_cursor_y) * CO5300::WIDTH) as usize + x as usize]);
+            
+            for a in &scene {
+                //a.draw(&mut draw_row_buf[..], draw_cursor_y, 2);
+            }
+
             co5300
                 .borrow_mut()
-                .draw_buf(0, draw_cursor_y, CO5300::WIDTH, 2, &draw_row_buf);
-            for a in &scene {
-                a.draw(&mut draw_row_buf[..], draw_cursor_y);
-            }
+                .draw_buf(0, draw_cursor_y, CO5300::WIDTH, 2, &draw_buf);
         }
+
         /*
         info!(
             "frame time {:?}",
@@ -177,7 +199,6 @@ async fn main(spawner: Spawner) -> ! {
         Timer::after_millis(500).await;
     }
 }
-
 
 #[embassy_executor::task]
 async fn boot_btn_task(

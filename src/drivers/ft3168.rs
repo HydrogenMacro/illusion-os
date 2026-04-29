@@ -3,7 +3,7 @@ use core::cell::RefCell;
 use esp_hal::{
     delay::Delay,
     gpio::{AnyPin, Level, Output, OutputConfig, Pull},
-    i2c,
+    i2c::{self, master::Config}, time::Rate,
 };
 use log::{error, info};
 
@@ -40,7 +40,17 @@ impl FT3168 {
         };
 
         driver.reset();
+        driver.set_power_mode();
         return driver;
+    }
+    pub fn set_power_mode(&self) {
+        let Some(mut i2c) = self.i2c.try_access() else {return;};
+        let mut buf = [0; 1];
+
+        if let Err(e) = i2c.write_read(0x38, &[0xA5, 0x00], &mut buf) {
+            error!("i2c err: {e}");
+            self.reset();
+        }
     }
     pub fn reset(&self) {
         self.reset_pin.borrow_mut().set_low();
@@ -60,6 +70,7 @@ impl FT3168 {
         }
 
         let mut touch1_x = 0u16;
+        i2c.apply_config(&Config::default().with_frequency(Rate::from_khz(400)));
         if let Err(e) = i2c.write_read(0x38, &[0x03], &mut buf) {
             error!("i2c err: {e}");
             self.reset();
@@ -79,6 +90,8 @@ impl FT3168 {
             error!("i2c err: {e}");
         };
         touch1_y |= buf[0] as u16;
+        i2c.apply_config(&Config::default().with_frequency(Rate::from_mhz(10)));
+
         return Some((touch1_x, touch1_y));
     }
 }

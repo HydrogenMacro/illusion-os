@@ -67,6 +67,8 @@ chrono = { version = "0.4.44", default-features = false }
 ambassador = "0.5.0"
 multiconst = "0.2.2"
 
+[patch.crates-io]
+heapless = { git = "https://github.com/rust-embedded/heapless" }
 
 [profile.dev]
 # Rust debug is too slow.
